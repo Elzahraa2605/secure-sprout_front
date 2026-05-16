@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "SecureSproutExpo",
+    "slug": "SecureSproutExpo",
+    "scheme": "securesprout",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/o1.jpg",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/o1.jpg",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.securesprout.app",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "QUERY_ALL_PACKAGES"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"
+        }
+      }
+    },
+    "web": {
+      "favicon": "./assets/o1.jpg"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "@react-native-community/datetimepicker",
+        "expo-location"
+      ],
+      "expo-background-task"
+    ]
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "blocked_app_categories": [
+    {
+      "category": "social",
+      "apps": [
+        {
+          "name": "Facebook",
+          "package": "com.facebook.katana",
+          "domains": [
+            "facebook.com",
+            "fb.com",
+            "fbcdn.net",
+            "m.facebook.com"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "TikTok",
+          "package": "com.zhiliaoapp.musically",
+          "domains": [
+            "tiktok.com",
+            "v.tiktok.com",
+            "tiktokv.com",
+            "musical.ly"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "Instagram",
+          "package": "com.instagram.android",
+          "domains": [
+            "instagram.com",
+            "cdninstagram.com",
+            "instagr.am"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "Snapchat",
+          "package": "com.snapchat.android",
+          "domains": [
+            "snapchat.com",
+            "snap.com"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "X (Twitter)",
+          "package": "com.twitter.android",
+          "domains": [
+            "twitter.com",
+            "x.com",
+            "t.co",
+            "twimg.com"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "YouTube",
+          "package": "com.google.android.youtube",
+          "domains": [
+            "youtube.com",
+            "m.youtube.com",
+            "youtu.be",
+            "ytimg.com",
+            "googlevideo.com"
+          ],
+          "category": "social"
+        },
+        {
+          "name": "Telegram",
+          "package": "org.telegram.messenger",
+          "domains": [
+            "telegram.org",
+            "web.telegram.org",
+            "t.me"
+          ],
+          "category": "social"
+        }
+      ]
+    }
+  ],
+  "blocked_download_types": [
+    "exe",
+    "apk",
+    "bat",
+    "msi",
+    "jar"
+  ],
+  "virustotal_api_key": "4e5754649bb6b8643b1b6718e27390138805e4950a196aeeb29352c7b3913e9d"
+}
