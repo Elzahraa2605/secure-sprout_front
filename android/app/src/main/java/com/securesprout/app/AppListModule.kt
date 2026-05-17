@@ -62,7 +62,7 @@ class AppListModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         }
     }
 
-    // 2. دالة كشف التطبيق الحالي
+    // 2. دالة كشف التطبيق الحالي (المعدلة لترجع الـ Pixel Launcher فوراً ليفهمه الـ React Native)
     @ReactMethod
     fun getCurrentApp(promise: Promise) {
         try {
@@ -77,15 +77,7 @@ class AppListModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 for (stat in sortedStats) {
                     val pkg = stat.packageName
                     
-                    if (pkg == "com.android.launcher" || 
-                        pkg == "com.google.android.apps.nexuslauncher" || 
-                        pkg.contains("launcher") ||
-                        pkg == "com.android.systemui" ||
-                        pkg == "com.securesprout.app" || 
-                        pkg == "com.android.settings") { 
-                        continue
-                    }
-                    
+                    // هنا بنرجع اسم الحزمة المفتوحة أياً كانت عشان الـ React Native يقارنها بذكاء ويقفل في الـ Downtime
                     promise.resolve(pkg)
                     return
                 }
@@ -96,22 +88,33 @@ class AppListModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         }
     }
 
-    // 3. دالة الخروج للهوم
+    // 3. دالة الخروج للهوم (المعدلة لفتح الـ Pixel Launcher مباشرة وبدون إظهار الـ Pop-up)
     @ReactMethod
     fun goToHomeScreen() {
         try {
             val intent = Intent(Intent.ACTION_MAIN)
             intent.addCategory(Intent.CATEGORY_HOME)
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-
-            val chooser = Intent.createChooser(intent, "اختار 'Pixel Launcher' أو اللانشر الأصلي للخروج")
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            reactApplicationContext.startActivity(chooser)
-        } catch (e: Exception) {
-            val intent = Intent(Intent.ACTION_MAIN)
-            intent.addCategory(Intent.CATEGORY_HOME)
+            // إجبار فتح حزمة الـ Pixel Launcher مباشرة والنشاط الرئيسي بتاعه لعدم التداخل
+            intent.setClassName("com.google.android.apps.nexuslauncher", "com.google.android.apps.nexuslauncher.NexusLauncherActivity")
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             reactApplicationContext.startActivity(intent)
+        } catch (e: Exception) {
+            // خطة بديلة لو اختلف اسم الكلاس الداخلي في المحاكي
+            try {
+                val intent = reactApplicationContext.packageManager.getLaunchIntentForPackage("com.google.android.apps.nexuslauncher")
+                if (intent != null) {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    reactApplicationContext.startActivity(intent)
+                } else {
+                    // الحل الأخير العادي للأندرويد
+                    val normalIntent = Intent(Intent.ACTION_MAIN)
+                    normalIntent.addCategory(Intent.CATEGORY_HOME)
+                    normalIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    reactApplicationContext.startActivity(normalIntent)
+                }
+            } catch (ex: Exception) {
+                ex.printStackTrace()
+            }
         }
     }
 
