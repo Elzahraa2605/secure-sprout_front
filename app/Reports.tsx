@@ -25,13 +25,14 @@ export default function Reports() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [appUsages, setAppUsages] = useState<any[]>([]);
+  const [securityAlerts, setSecurityAlerts] = useState<any[]>([]); // <-- تم إضافة الـ State لحفظ إشعارات الحماية
   const [totalTime, setTotalTime] = useState("0h 0m");
   const [children, setChildren] = useState<any[]>([]);
   
   const [showChildModal, setShowChildModal] = useState(false);
   const [showRangeModal, setShowRangeModal] = useState(false);
   
-  const [selectedChild, setSelectedChild] = useState({ name: 'Select Child', id: null });
+  const [selectedChild, setSelectedChild] = useState<any>({ name: 'Select Child', id: null });
   const [selectedRange, setSelectedRange] = useState({ label: 'Today', value: 'today' });
 
   const ranges = [
@@ -40,7 +41,6 @@ export default function Reports() {
     { label: 'Last 30 Days', value: '30days' },
   ];
 
-  // دالة تنظيف التوكن وجلبه
   const getCleanToken = async () => {
     const rawToken = await AsyncStorage.getItem('userToken');
     return rawToken ? rawToken.replace(/"/g, '') : null;
@@ -64,19 +64,36 @@ export default function Reports() {
     }
   };
 
+  // دالة لمعالجة أوقات الإشعارات والتهديدات وتفادي كراش تنسيق الوقت بالمحاكيات القديمة
+  const formatAlertTime = (dateString: string) => {
+    try {
+      const d = new Date(dateString);
+      if (isNaN(d.getTime())) return "---";
+      return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      return "---";
+    }
+  };
+
   const fetchReports = async (childId: any, range: string) => {
     if (!childId) return;
     setLoading(true);
     try {
       const token = await getCleanToken();
-      const response = await axios.get(`http://192.168.1.9:8000/api/parent/reports/app-usage/${childId}?range=${range}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const headers = { 'Authorization': `Bearer ${token}` };
+
+      // دالة جلب إحصائيات التطبيقات الأصلية الخاصة بكِ دون أي تغيير
+      const response = await axios.get(`http://192.168.1.9:8000/api/parent/reports/app-usage/${childId}?range=${range}`, { headers });
       if (response.data.status === 'success') {
         setAppUsages(response.data.data || []);
         const totalMin = response.data.total_time || 0;
         setTotalTime(`${Math.floor(totalMin / 60)}h ${totalMin % 60}m`);
       }
+
+      // جلب التنبيهات الأمنية والتهديدات المحدثة من لارافيل لهذا الطفل وعرضها بالإنجليزية الموحدة
+      const alertsResponse = await axios.get(`http://192.168.1.9:8000/api/parent/alerts?child_id=${childId}&range=${range}`, { headers });
+      setSecurityAlerts(alertsResponse.data || []);
+
     } catch (error) {
       console.error("❌ Error fetching reports:", error);
     } finally {
@@ -108,7 +125,6 @@ export default function Reports() {
       console.log("📊 Syncing with getTodayUsage...");
       let usageData = await AppListModule.getTodayUsage();
       console.log("🔍 Raw Data from Android:", usageData);
-      // تحويل البيانات لو جاية String من الكوتلن
       const parsedData = typeof usageData === 'string' ? JSON.parse(usageData) : usageData;
       
       const token = await getCleanToken();
@@ -121,7 +137,8 @@ export default function Reports() {
         usage_date: today,
         category: "General"
       }));
-console.log("🚀 Payload being sent to Server:", JSON.stringify(appsPayload, null, 2));
+
+      console.log("🚀 Payload being sent to Server:", JSON.stringify(appsPayload, null, 2));
       if (appsPayload.length > 0) {
         await axios.post('http://192.168.1.9:8000/api/parent/usage/sync-bulk', {
           child_id: selectedChild.id,
@@ -189,6 +206,27 @@ console.log("🚀 Payload being sent to Server:", JSON.stringify(appsPayload, nu
               </View>
             ))}
           </View>
+        </View>
+
+        {/* 🛡️ جزء مضاف: عرض بوكس التهديدات الأمنية المحظورة متناسق ومنعزل تماماً دون أي تأثير على الشاشات القديمة */}
+        <Text style={styles.sectionTitle}>Security Threats Blocked</Text>
+        <View style={[styles.appsContainer, { marginBottom: 25 }]}>
+          {loading ? (
+            <ActivityIndicator color="#0288D1" size="small" />
+          ) : securityAlerts.length > 0 ? (
+            securityAlerts.map((alert: any, idx: number) => (
+              <View key={alert.uuid || alert.id || idx} style={styles.alertRowCustom}>
+                <Ionicons name={alert.type === 'threat_blocked' ? 'bug' : 'globe-outline'} size={22} color="#D32F2F" />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.alertTitleTextCustom}>{alert.title}</Text>
+                  <Text style={styles.alertBodyTextCustom}>{alert.message}</Text>
+                  <Text style={styles.alertTimeTextCustom}>{formatAlertTime(alert.created_at)}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.noDataText}>No critical security logs found for this period.</Text>
+          )}
         </View>
 
         <Text style={styles.sectionTitle}>Most Used Apps</Text>
@@ -282,5 +320,11 @@ const styles = StyleSheet.create({
   modalItem: { padding: 18, borderBottomWidth: 0.8, borderBottomColor: '#f0f0f0' },
   modalItemText: { textAlign: 'center', fontSize: 16, color: '#444' },
   closeBtn: { marginTop: 20, alignItems: 'center', padding: 10 },
-  noDataText: { textAlign: 'center', color: '#999', paddingVertical: 20 }
+  noDataText: { textAlign: 'center', color: '#999', paddingVertical: 20 },
+  
+  // الستيلات القياسية والمنعزلة المخصصة لبوكس التهديدات الأمني الجديد لمنع أي خطأ بناء
+  alertRowCustom: { flexDirection: 'row', paddingVertical: 12, borderBottomWidth: 0.5, borderBottomColor: '#FFCDD2', alignItems: 'flex-start' },
+  alertTitleTextCustom: { fontSize: 16, color: '#B71C1C', fontWeight: 'bold' },
+  alertBodyTextCustom: { fontSize: 13, color: '#546E7A', marginTop: 3, lineHeight: 18 },
+  alertTimeTextCustom: { fontSize: 11, color: '#90A4AE', marginTop: 5 }
 });

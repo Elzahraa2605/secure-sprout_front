@@ -15,12 +15,11 @@ import WebView, { WebViewMessageEvent } from 'react-native-webview';
 
 const { FileMonitor } = NativeModules;
 
-const BACKEND_URL = 'http://10.0.2.2:9000'; // استخدم
+const BACKEND_URL = 'http://10.0.2.2:9000'; 
 const SECRET_KEY  = 'zahraa-secret-2026';
 const HOME_URL    = 'https://www.google.com';
 const HEADERS     = { 'Content-Type': 'application/json', 'X-API-KEY': SECRET_KEY };
 
-// ── امتدادات الملفات (تم إضافة txt لاكتشاف EICAR وحذف php لفتح الصفحات) ──
 const DOWNLOAD_EXTENSIONS = [
   'exe','bat','cmd','msi','dll','apk','dex','sh','ps1','vbs','jar','hta','wsf','com','pif','scr',
   'zip','rar','7z','tar','gz','bz2','xz','cab','iso','dmg',
@@ -28,10 +27,9 @@ const DOWNLOAD_EXTENSIONS = [
   'pdf','doc','docx','xls','xlsx','ppt','pptx','odt','ods',
   'mp3','mp4','avi','mov','mkv','flv','wmv','webm',
   'jpg','jpeg','png','gif','bmp','svg','webp','ico',
-  'txt' // <-- تم الإضافة هنا عشان ملفات EICAR الوهمية
+  'txt' 
 ];
 
-// ── JS يُحقن في كل صفحة ──────────────────────────────
 const INTERCEPT_JS = `
 (function() {
   var EXTS = ${JSON.stringify(DOWNLOAD_EXTENSIONS)};
@@ -61,16 +59,14 @@ const INTERCEPT_JS = `
           type: 'DOWNLOAD_INTERCEPTED',
           url: abs,
         }));
-        return true; // تم الاعتراض
+        return true; 
       }
     } catch(e) {}
     return false;
   }
 
-  // اعتراض الضغط على الروابط
   document.addEventListener('click', function(e) {
     var el = e.target;
-    // ارتقي لأعلى العناصر لو الضغط كان على عنصر جوه الـ <a>
     while (el && el.tagName !== 'A') el = el.parentElement;
     if (el && el.href && intercept(el.href)) {
       e.preventDefault();
@@ -78,7 +74,6 @@ const INTERCEPT_JS = `
     }
   }, true);
 
-  // اعتراض أي تغيير في window.location نحو ملف
   var _open = window.open;
   window.open = function(url) {
     if (url && intercept(url)) return null;
@@ -89,7 +84,6 @@ const INTERCEPT_JS = `
 })();
 `;
 
-// ── Cache ─────────────────────────────────────────────
 const safeCache    = new Set<string>(['google.com','gstatic.com','googleapis.com','google.com.eg','ggpht.com','googleusercontent.com','youtube.com','ytimg.com','googlevideo.com']);
 const blockedCache = new Set<string>();
 const approvedOnce = new Set<string>();
@@ -124,16 +118,15 @@ async function checkDomain(host: string): Promise<{ allowed: boolean; reason?: s
   if (safeCache.has(host))    return { allowed: true };
   if (blockedCache.has(host)) return { allowed: false, reason: 'موقع محظور' };
 
-  let childId = '0';
+  // 1. قراءة الـ ID الرقمي الحقيقي للطفل المسجل من الـ AsyncStorage
+  let childId = '1';
   try {
     const rawChild = await AsyncStorage.getItem('childInfo');
     if (rawChild) {
       const parsed = JSON.parse(rawChild);
-      if (parsed && parsed.id) childId = parsed.id.toString();
+      if (parsed && parsed.id) childId = parsed.id.toString(); // سيقرأ رقم 1 الفعلي
     }
-  } catch {
-    // ignore parsing/storage errors and continue with default childId
-  }
+  } catch {}
 
   try {
     const res  = await fetch(`${BACKEND_URL}/check-safety`, {
@@ -150,10 +143,19 @@ async function checkDomain(host: string): Promise<{ allowed: boolean; reason?: s
 }
 
 async function scanFile(fileUrl: string, filename: string): Promise<{ allowed: boolean; reason?: string }> {
+  let childId = '1';
+  try {
+    const rawChild = await AsyncStorage.getItem('childInfo');
+    if (rawChild) {
+      const parsed = JSON.parse(rawChild);
+      if (parsed && parsed.id) childId = parsed.id.toString();
+    }
+  } catch {}
+
   try {
     const res  = await fetch(`${BACKEND_URL}/scan-file`, {
       method: 'POST', headers: HEADERS,
-      body: JSON.stringify({ url: fileUrl, filename }),
+      body: JSON.stringify({ url: fileUrl, filename, child_id: childId }),
     });
     return await res.json();
   } catch {
@@ -186,11 +188,9 @@ export default function SafeBrowser() {
     setStatus(isFile ? 'file_blocked' : 'blocked');
   }, []);
 
-  // ── بدء مراقبة مجلد Downloads أوتوماتيك ─────────────
   useEffect(() => {
     FileMonitor?.startWatching(SECRET_KEY, BACKEND_URL);
 
-    // استقبال إشعار لو ملف اتحذف لأنه خطير
     const emitter = new NativeEventEmitter(FileMonitor);
     const sub = emitter.addListener('onFileDangerous', (data) => {
       Alert.alert(
@@ -206,7 +206,6 @@ export default function SafeBrowser() {
     };
   }, []);
 
-  // ── معالجة التحميل المعترض من JS ─────────────────────
   const handleFileDownload = useCallback(async (fileUrl: string) => {
     const filename = getFilename(fileUrl);
     console.log('[DOWNLOAD] Intercepted:', filename);
@@ -216,18 +215,15 @@ export default function SafeBrowser() {
     setStatus('scanning_file');
 
     try {
-      let childId = 'child_01';
+      let childId = '1';
       try {
         const rawChild = await AsyncStorage.getItem('childInfo');
         if (rawChild) {
           const parsed = JSON.parse(rawChild);
-          if (parsed && typeof parsed.id === 'string') childId = parsed.id;
+          if (parsed && parsed.id) childId = parsed.id.toString();
         }
-      } catch {
-        // ignore parsing/storage errors and continue with default childId
-      }
+      } catch {}
 
-      // نستخدم الـ Native Module يحمّل ويفحص ويحفظ
       const result = await FileMonitor.downloadAndScan(
         fileUrl, filename, SECRET_KEY, BACKEND_URL,
       );
@@ -247,7 +243,6 @@ export default function SafeBrowser() {
     }
   }, [showBlock]);
 
-  // ── استقبال رسائل JS ──────────────────────────────────
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     try {
       const msg = JSON.parse(event.nativeEvent.data);
@@ -257,7 +252,6 @@ export default function SafeBrowser() {
     } catch {}
   }, [handleFileDownload]);
 
-  // ── التنقل من شريط العنوان ────────────────────────────
   const navigateTo = useCallback(async (rawInput: string) => {
     const url  = buildUrl(rawInput);
     const host = getHostname(url);
@@ -278,7 +272,6 @@ export default function SafeBrowser() {
     }
   }, [showBlock]);
 
-  // ── onShouldStart: خط دفاع ثاني (بعد JS) ────────────
   const onShouldStart = useCallback((request: any): boolean => {
     const url: string = request.url;
 
@@ -288,13 +281,11 @@ export default function SafeBrowser() {
     const host = getHostname(url);
     if (!host) return true;
 
-    // لو ملف تحميل - امنعه دايماً، الـ Native Module هيتولى الأمر
     if (isDownloadUrl(url)) {
       handleFileDownload(url);
       return false;
     }
 
-    // فحص الدومين للصفحات العادية
     if (safeCache.has(host))  return true;
     if (blockedCache.has(host)) {
       setTimeout(() => showBlock('موقع محظور'), 0);
@@ -333,8 +324,6 @@ export default function SafeBrowser() {
 
   return (
     <View style={s.container}>
-
-      {/* شريط العنوان */}
       <View style={s.bar}>
         <TouchableOpacity onPress={() => webViewRef.current?.goBack()} style={s.navBtn}>
           <Text style={s.navTxt}>‹</Text>
@@ -361,7 +350,6 @@ export default function SafeBrowser() {
         </TouchableOpacity>
       </View>
 
-      {/* Modal فحص الملف */}
       <Modal transparent visible={scanModal} animationType="fade">
         <View style={s.modalBg}>
           <View style={s.modalBox}>
@@ -374,7 +362,6 @@ export default function SafeBrowser() {
         </View>
       </Modal>
 
-      {/* Overlay فحص الدومين */}
       {status === 'checking_domain' && (
         <View style={s.overlay}>
           <ActivityIndicator size="large" color="#007AFF" />
@@ -382,7 +369,6 @@ export default function SafeBrowser() {
         </View>
       )}
 
-      {/* شاشة الحجب أو المتصفح */}
       {isBlocked ? (
         <View style={s.blockScreen}>
           <Text style={s.blockIcon}>{status === 'file_blocked' ? '☣️' : '🚫'}</Text>
@@ -399,19 +385,16 @@ export default function SafeBrowser() {
           ref={webViewRef}
           source={{ uri: currentUrl }}
           style={s.webview}
-          // JS يُحقن قبل تحميل الصفحة لاعتراض روابط التحميل
           injectedJavaScriptBeforeContentLoaded={INTERCEPT_JS}
           onMessage={onMessage}
           onShouldStartLoadWithRequest={onShouldStart}
           onNavigationStateChange={(nav) => { if (nav.url) setUrlBar(nav.url); }}
           onFileDownload={({ nativeEvent }) => {
-            // Android fallback لو JS injection مش اشتغل
             handleFileDownload(nativeEvent.downloadUrl);
           }}
           javaScriptEnabled
           domStorageEnabled
           startInLoadingState
-          onError={(e) => console.warn('WebView error:', e.nativeEvent)}
         />
       )}
     </View>
@@ -420,48 +403,23 @@ export default function SafeBrowser() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
-  bar: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 8, paddingVertical: 10,
-    backgroundColor: '#f5f5f5',
-    borderBottomWidth: 1, borderBottomColor: '#ddd',
-  },
+  bar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 10, backgroundColor: '#f5f5f5', borderBottomWidth: 1, borderBottomColor: '#ddd' },
   navBtn: { paddingHorizontal: 12, paddingVertical: 6 },
   navTxt: { fontSize: 32, color: '#007AFF' },
-  input: {
-    flex: 1, height: 46, backgroundColor: '#fff',
-    borderRadius: 12, paddingHorizontal: 14, fontSize: 15,
-    borderWidth: 1, borderColor: '#ddd', marginHorizontal: 6,
-  },
-  overlay: {
-    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    justifyContent: 'center', alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.95)', zIndex: 10,
-  },
+  input: { flex: 1, height: 46, backgroundColor: '#fff', borderRadius: 12, paddingHorizontal: 14, fontSize: 15, borderWidth: 1, borderColor: '#ddd', marginHorizontal: 6 },
+  overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.95)', zIndex: 10 },
   checkTxt: { marginTop: 14, fontSize: 15, color: '#333' },
   webview: { flex: 1 },
-  modalBg: {
-    flex: 1, justifyContent: 'center', alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  modalBox: {
-    backgroundColor: '#fff', borderRadius: 20, padding: 30,
-    alignItems: 'center', width: '80%', elevation: 10,
-  },
+  modalBg: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  modalBox: { backgroundColor: '#fff', borderRadius: 20, padding: 30, alignItems: 'center', width: '80%', elevation: 10 },
   modalIcon:  { fontSize: 50, marginBottom: 10 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
   modalFile:  { fontSize: 13, color: '#888', marginTop: 6, textAlign: 'center' },
   modalSub:   { fontSize: 13, color: '#999', marginTop: 16, textAlign: 'center', lineHeight: 20 },
-  blockScreen: {
-    flex: 1, justifyContent: 'center', alignItems: 'center',
-    backgroundColor: '#fff5f5', padding: 30,
-  },
+  blockScreen: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff5f5', padding: 30 },
   blockIcon:   { fontSize: 72, marginBottom: 16 },
   blockTitle:  { fontSize: 26, fontWeight: 'bold', color: '#d00', marginBottom: 10 },
   blockReason: { fontSize: 15, color: '#555', textAlign: 'center', marginBottom: 30, lineHeight: 24 },
-  homeBtn: {
-    backgroundColor: '#4CAF50', paddingVertical: 12,
-    paddingHorizontal: 32, borderRadius: 24,
-  },
-  homeTxt: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  homeBtn: { backgroundColor: '#4CAF50', paddingVertical: 12, paddingHorizontal: 32, borderRadius: 24 },
+  homeTxt: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
 });

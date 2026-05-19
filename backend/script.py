@@ -1,17 +1,4 @@
 ﻿# -*- coding: utf-8 -*-
-"""
-╔══════════════════════════════════════════════════════════════╗
-║         Family Monitor PRO  —  v4.5  (10/10 Release)        ║
-║                                                              ║
-║  Fixes over v4.4:                                            ║
-║  • MY_SECRET_KEY → reads from FM_SECRET_KEY env var         ║
-║  • RateLimiter: no nested locking → zero deadlock risk       ║
-║  • DNS queries: parallel (ThreadPoolExecutor) → ~6× faster   ║
-║  • block/unblock-app: _config_lock + atomic write + cache    ║
-║  • scan_file: correct handling of missing Content-Length     ║
-║  • _save_config: atomic os.replace() — no partial writes     ║
-╚══════════════════════════════════════════════════════════════╝
-"""
 
 from flask import Flask, request, jsonify
 import requests
@@ -33,58 +20,26 @@ import threading
 from collections import Counter, deque
 from datetime import datetime
 
-# ── UTF-8 stdout/stderr ────────────────────────────────────────
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-# ══════════════════════════════════════════════════════════════
-# Flask App  +  OOM Protection
-# ══════════════════════════════════════════════════════════════
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 160 * 1024 * 1024   # 160 MB hard Flask limit
+app.config["MAX_CONTENT_LENGTH"] = 160 * 1024 * 1024
 
-# ══════════════════════════════════════════════════════════════
-# Constants
-# ══════════════════════════════════════════════════════════════
-
-# Child-safe Android download ceiling.
-# Files above this are blocked WITHOUT scanning — too large for a
-# child's device (storage, RAM, mobile data).  Configurable via
-# parent_config.json → "max_file_size_mb".  Default: 150 MB.
 ANDROID_CHILD_MAX_MB: int = 150
 
-# ══════════════════════════════════════════════════════════════
-# Rate Limiter — sliding-window + burst protection, per-IP,
-# thread-safe, memory-based (no Redis dependency).
-# ══════════════════════════════════════════════════════════════
+
 class RateLimiter:
-    """
-    Sliding-window rate limiter with burst protection.
-    Thread-safe via a single RLock (no nested locking → no deadlock risk).
-
-    Design:
-    - _buckets stores a deque of timestamps per key (not a count+start dict).
-    - is_allowed() acquires the lock ONCE and performs:
-        1. Burst check  : >2 requests in the last 1 second  → False
-        2. Window check : >30 requests in the last 60 seconds → False
-        3. Periodic cleanup of stale keys (every 60 s).
-
-    NOTE: In a multi-worker Gunicorn setup each worker has its own
-    memory, so limits are per-worker. For cross-worker enforcement
-    replace _buckets with a Redis backend.
-    """
-    _CLEANUP_INTERVAL = 60      # seconds between automatic cleanups
-    _STALE_WINDOW     = 120     # keys with no hits in this window are purged
-
-    # Burst-protection constants (not overridable by callers — intentional)
-    _BURST_WINDOW = 1           # seconds to look back for burst detection
-    _BURST_MAX    = 2           # max requests allowed inside _BURST_WINDOW
+    _CLEANUP_INTERVAL = 60
+    _STALE_WINDOW     = 120
+    _BURST_WINDOW     = 1
+    _BURST_MAX        = 2
 
     def __init__(self):
-        self._buckets: dict = {}   # key → deque of float timestamps
+        self._buckets: dict = {}
         self._lock          = threading.RLock()
         self._last_cleanup  = time.time()
 
@@ -92,7 +47,6 @@ class RateLimiter:
         now = time.time()
 
         with self._lock:
-            # ── periodic cleanup (inside the same lock, no nesting) ────
             if now - self._last_cleanup >= self._CLEANUP_INTERVAL:
                 self._buckets = {
                     k: v for k, v in self._buckets.items()
@@ -100,39 +54,29 @@ class RateLimiter:
                 }
                 self._last_cleanup = now
 
-            # ── retrieve or create the timestamp deque for this key ────
             if key not in self._buckets:
                 self._buckets[key] = deque()
 
             ts_deque = self._buckets[key]
 
-            # ── drop timestamps outside the sliding window ─────────────
             cutoff_window = now - window
             while ts_deque and ts_deque[0] < cutoff_window:
                 ts_deque.popleft()
 
-            # ── 1. Burst protection — max _BURST_MAX req / _BURST_WINDOW s
             cutoff_burst = now - self._BURST_WINDOW
             burst_count  = sum(1 for t in ts_deque if t >= cutoff_burst)
             if burst_count >= self._BURST_MAX:
-                # Do NOT record this timestamp — attacker gets no credit
                 return False
 
-            # ── 2. Sliding-window check — max max_calls / window s ─────
             if len(ts_deque) >= max_calls:
                 return False
 
-            # ── All checks passed — record the timestamp and allow ──────
             ts_deque.append(now)
             return True
 
 
 _rate_limiter = RateLimiter()
 
-
-# ══════════════════════════════════════════════════════════════
-# Config Cache — avoids disk hit on every request
-# ══════════════════════════════════════════════════════════════
 _config_cache: dict | None = None
 _config_mtime: float = 0.0
 _config_lock  = threading.Lock()
@@ -141,13 +85,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "parent_config.json")
 
 
 def load_config() -> dict:
-    """
-    Load parent_config.json.
-    Tries to sync from Laravel API first; falls back to local file if API is unavailable.
-    Re-reads from disk only when the file's mtime has changed.
-    """
     global _config_cache, _config_mtime
-    # ── محاولة جلب الإعدادات من Laravel API ──────────────────
     try:
         api_url  = "http://127.0.0.1:8000/api/v1/config"
         response = requests.get(api_url, headers={"X-API-KEY": MY_SECRET_KEY}, timeout=10)
@@ -160,7 +98,6 @@ def load_config() -> dict:
             return new_config
     except Exception as e:
         print(f"[BACKEND] Sync failed: {e}. Using local parent_config.json", flush=True)
-    # ── Fallback: الملف المحلي لو الباك إيند مش شغال ─────────
     try:
         mtime = os.path.getmtime(CONFIG_PATH)
         with _config_lock:
@@ -176,14 +113,8 @@ def load_config() -> dict:
         return _config_cache or {}
 
 
-# ══════════════════════════════════════════════════════════════
-# Static Settings
-# ══════════════════════════════════════════════════════════════
 GOOGLE_SAFE_BROWSING_API_KEY = os.environ.get("GSB_API_KEY", "")
 
-# Secret key loaded from environment variable (never hardcode in production).
-# Set via:  export FM_SECRET_KEY="your-strong-secret-here"
-# Falls back to a default ONLY for local development — change before deploying.
 MY_SECRET_KEY: str = os.environ.get("FM_SECRET_KEY", "zahraa-secret-2026")
 if MY_SECRET_KEY == "zahraa-secret-2026":
     print("[SECURITY WARNING] FM_SECRET_KEY is using the default dev value. "
@@ -226,8 +157,6 @@ FAMILY_DNS_SERVERS = [
     {"name": "Quad9 Security",       "ip": "9.9.9.9",         "port": 53},
 ]
 
-# Magic-byte signatures — ordered longest-first so longest match wins.
-# Tuple: (signature_bytes, file_type_label, is_dangerous)
 MAGIC_SIGNATURES = [
     (b"dex\n035\x00",                             "dex",         True),
     (b"\x89\x50\x4E\x47\x0D\x0A\x1A\x0A",        "png",         False),
@@ -263,9 +192,6 @@ MAGIC_SIGNATURES = [
 ]
 
 
-# ══════════════════════════════════════════════════════════════
-# Request / Response Logging
-# ══════════════════════════════════════════════════════════════
 @app.before_request
 def log_incoming_request():
     ts        = datetime.now().strftime("%H:%M:%S")
@@ -293,9 +219,6 @@ def request_entity_too_large(_e):
     return jsonify({"allowed": False, "reason": "File too large (max 160 MB hard limit)"}), 413
 
 
-# ══════════════════════════════════════════════════════════════
-# Helpers
-# ══════════════════════════════════════════════════════════════
 def is_port_busy(host: str, port: int) -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(0.5)
@@ -305,26 +228,40 @@ def is_port_busy(host: str, port: int) -> bool:
         sock.close()
 
 
+def _send_log_async(payload: dict) -> None:
+    def _worker():
+        try:
+
+            api_url = "http://127.0.0.1:8000/api/internal/log-alert"
+            
+
+            resp = requests.post(
+                api_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                timeout=5,
+            )
+            print(f"[DEBUG] Laravel Sync Status: {resp.status_code} | Response: {resp.text}", flush=True)
+        except Exception as e:
+            print(f"[DEBUG] Failed to sync alert with Laravel: {e}", flush=True)
+            
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 def log_status(domain: str, allowed: bool, reason: str = "", child_id: str = "child_01") -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     if not allowed:
-        # 1. دي الجملة اللي بتظهر في السكريبت (Terminal)
         print(f"[{ts}] ⛔ BLOCK: {domain} | Reason: {reason}", flush=True)
-        # 2. هنا بنبعت نفس السبب ده للداتا بيز
-        try:
-            requests.post(
-                "http://127.0.0.1:8000/api/v1/logs/block",
-                json={
-                    "child_id": child_id,
-                    "type":     "web",    # نوع التنبيه
-                    "target":   domain,   # الموقع (فيس، تيك توك..)
-                    "reason":   reason,   # نفس السبب اللي ظهر في السكريبت
-                },
-                headers={"X-API-KEY": MY_SECRET_KEY},
-                timeout=2,
-            )
-        except Exception:
-            pass
+        _send_log_async({
+            "child_id": child_id,
+            "type":     "content_blocked",
+            "title":    "محاولة زيارة موقع محظور",
+            "message":  f"الطفل حاول الدخول إلى {domain}. السبب: {reason}",
+        })
     else:
         print(f"[{ts}] ✅ ALLOW: {domain}", flush=True)
 
@@ -332,32 +269,18 @@ def log_status(domain: str, allowed: bool, reason: str = "", child_id: str = "ch
 def log_file(filename: str, allowed: bool, reason: str = "", child_id: str = "child_01") -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     if not allowed:
-        # 1. طباعة السبب في السكريبت
         print(f"[{ts}] ⛔ FILE-BLOCK: {filename} | Reason: {reason}", flush=True)
-        # 2. تسجيل التنبيه كـ "Threat Blocked" في الداتا بيز
-        try:
-            requests.post(
-                "http://127.0.0.1:8000/api/v1/logs/block",
-                json={
-                    "child_id": child_id,
-                    "type":     "file",    # نوع التنبيه ملف
-                    "target":   filename,  # اسم الملف (مثلاً virus.apk)
-                    "reason":   reason,    # السبب (مثلاً: ملف كبير جداً أو مشبوه)
-                },
-                headers={"X-API-KEY": MY_SECRET_KEY},
-                timeout=2,
-            )
-        except Exception:
-            pass
+        _send_log_async({
+            "child_id": child_id,
+            "type":     "threat_blocked",
+            "title":    "تم حظر ملف خطير",
+            "message":  f"تم منع تحميل ملف مريب يحتوي على صيغة تنفيذية: {filename}. السبب: {reason}",
+        })
     else:
         print(f"[{ts}] ✅ FILE-OK: {filename}", flush=True)
 
 
 def auth_required(req) -> bool:
-    """
-    Constant-time HMAC comparison — prevents timing-oracle attacks.
-    Plain `==` leaks info about where strings first differ.
-    """
     provided = req.headers.get("X-API-KEY", "")
     return hmac.compare_digest(provided, MY_SECRET_KEY)
 
@@ -372,31 +295,15 @@ def get_file_extension(filename: str) -> str:
     return parts[1] if len(parts) == 2 else ""
 
 
-# ══════════════════════════════════════════════════════════════
-# ClamAV — local fallback antivirus
-# Tries Unix socket first; falls back to TCP (Docker-friendly).
-# ══════════════════════════════════════════════════════════════
 _CLAMAV_UNIX_SOCKET = "/var/run/clamav/clamd.sock"
 _CLAMAV_TCP_HOST    = os.environ.get("CLAMAV_HOST", "127.0.0.1")
 _CLAMAV_TCP_PORT    = int(os.environ.get("CLAMAV_PORT", "3310"))
 
 
 def scan_with_clamav(file_bytes: bytes) -> tuple:
-    """
-    Scan bytes via ClamAV daemon.
-    Returns: (True=clean | False=malware | None=unavailable, message)
-
-    Connection priority:
-      1. Unix socket  (bare-metal / single-container)
-      2. TCP socket   (Docker Compose: CLAMAV_HOST / CLAMAV_PORT env vars)
-
-    Requires:  pip install clamd
-               + clamd service running
-    """
     try:
         import clamd
 
-        # ── attempt 1: Unix socket ──────────────────────────
         cd = None
         if os.path.exists(_CLAMAV_UNIX_SOCKET):
             try:
@@ -405,7 +312,6 @@ def scan_with_clamav(file_bytes: bytes) -> tuple:
             except Exception:
                 cd = None
 
-        # ── attempt 2: TCP socket ───────────────────────────
         if cd is None:
             try:
                 cd = clamd.ClamdNetworkSocket(_CLAMAV_TCP_HOST, _CLAMAV_TCP_PORT)
@@ -431,11 +337,7 @@ def scan_with_clamav(file_bytes: bytes) -> tuple:
         return None, f"ClamAV: {type(exc).__name__}: {exc}"
 
 
-# ══════════════════════════════════════════════════════════════
-# Domain Check Functions
-# ══════════════════════════════════════════════════════════════
 def check_blocked_apps(domain: str) -> tuple:
-    """Check domain against parent-configured blocked apps & categories."""
     try:
         config       = load_config()
         clean_domain = domain.replace("www.", "")
@@ -460,13 +362,7 @@ def check_blocked_apps(domain: str) -> tuple:
 
 
 def check_multi_dns_family(domain: str) -> tuple:
-    """
-    Query every family-filter DNS server in PARALLEL (ThreadPoolExecutor).
-    Worst-case latency = single server timeout (≈2s) instead of N × timeout.
-    Returns (allowed, reason, per-server detail dict).
-    """
     def _query_one(server: dict) -> tuple:
-        """Returns (server_name, status_str) for one DNS server."""
         name = server["name"]
         try:
             resolver             = dns.resolver.Resolver()
@@ -498,7 +394,6 @@ def check_multi_dns_family(domain: str) -> tuple:
 
 
 def check_google_reputation(domain: str) -> tuple:
-    """Query Google Safe Browsing v4 API."""
     url = (
         "https://safebrowsing.googleapis.com/v4/threatMatches:find"
         f"?key={GOOGLE_SAFE_BROWSING_API_KEY}"
@@ -532,15 +427,10 @@ def check_google_reputation(domain: str) -> tuple:
 
 
 def is_suspicious_pattern_details(domain: str) -> tuple:
-    """
-    Local heuristic risk scorer.
-    Returns (is_blocked, reason, detail_lines).
-    """
     details       = []
     risk_score    = 0
     BLOCK_THRESHOLD = 3
 
-    # TLD check
     tld = "." + domain.split(".")[-1] if "." in domain else domain
     if any(domain.endswith(x) for x in SUSPICIOUS_TLDS):
         risk_score += 2
@@ -548,7 +438,6 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
     else:
         details.append(f"[4] TLD → PASS ({tld})")
 
-    # Subdomain depth
     depth = domain.count(".")
     if depth > 3 and not any(t in domain for t in TRUSTED_DOMAINS):
         risk_score += 1
@@ -556,7 +445,6 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
     else:
         details.append(f"[4] Subdomains → PASS ({depth + 1} parts)")
 
-    # Randomness in main label
     main = domain.split(".")[0]
     if len(main) > 15 and re.search(r"[0-9].*[a-z]|[a-z].*[0-9]", main):
         if not any(t in domain for t in TRUSTED_DOMAINS):
@@ -567,7 +455,6 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
     else:
         details.append(f"[4] Randomness → PASS (len={len(main)})")
 
-    # Unicode / homograph
     try:
         domain.encode("ascii")
         details.append("[4] Unicode/Homograph → PASS (ASCII)")
@@ -575,7 +462,6 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
         risk_score += 5
         details.append("[4] Unicode/Homograph → +5 pts (non-ASCII chars)")
 
-    # Bad keywords
     hit = next((w for w in BAD_KEYWORDS if w in domain), None)
     if hit:
         risk_score += 5
@@ -583,14 +469,12 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
     else:
         details.append("[4] Keywords → PASS")
 
-    # IP as domain
     if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", domain):
         risk_score += 3
         details.append("[4] IP-as-domain → +3 pts")
     else:
         details.append("[4] IP-as-domain → PASS")
 
-    # Typosquatting
     parts = domain.lower().split(".")
     is_trusted = any(
         t in parts or domain.endswith(f".{t}.com")
@@ -618,7 +502,6 @@ def is_suspicious_pattern_details(domain: str) -> tuple:
 
 
 def scan_domain_layers(domain: str) -> dict:
-    """Run all domain-check layers and return the aggregated result."""
     details          = []
     detailed_reports = {}
     block_layer      = None
@@ -628,7 +511,6 @@ def scan_domain_layers(domain: str) -> dict:
     print(f"🌐 Domain scan: {domain}")
     print(f"{'═'*60}")
 
-    # Layer 1 — Multi-DNS family filters
     ok, reason, dns_d = check_multi_dns_family(domain)
     detailed_reports.update(dns_d)
     if not ok:
@@ -641,7 +523,6 @@ def scan_domain_layers(domain: str) -> dict:
         line = f"     - {srv}: {st}"
         details.append(line); print(line)
 
-    # Layer 2 — Google Safe Browsing
     if block_layer is None:
         ok, reason, gsb_st = check_google_reputation(domain)
         detailed_reports["Google_Safe_Browsing"] = gsb_st
@@ -657,7 +538,6 @@ def scan_domain_layers(domain: str) -> dict:
         msg = "[2] Google Safe Browsing → SKIPPED"
         details.append(msg); print(msg)
 
-    # Layer 3 — Parent blocked apps
     if block_layer is None:
         blocked, reason = check_blocked_apps(domain)
         if blocked:
@@ -671,7 +551,6 @@ def scan_domain_layers(domain: str) -> dict:
         msg = "[3] Parent Blocked Apps → SKIPPED"
         details.append(msg); print(msg)
 
-    # Layer 4 — Local heuristics
     if block_layer is None:
         is_bad, reason, local_d = is_suspicious_pattern_details(domain)
         details.extend(local_d)
@@ -709,15 +588,7 @@ def scan_domain_layers(domain: str) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════
-# File Scanning — Detection Helpers
-# ══════════════════════════════════════════════════════════════
 def detect_real_type(file_bytes: bytes) -> tuple:
-    """
-    Identify file type by magic bytes.
-    Chooses the signature with the longest byte-match (most specific).
-    Falls back to 'hidden_exe' if MZ header found deeper in file.
-    """
     best_type, best_danger, best_len = "unknown", False, 0
     for sig, ftype, dangerous in MAGIC_SIGNATURES:
         slen = len(sig)
@@ -727,7 +598,6 @@ def detect_real_type(file_bytes: bytes) -> tuple:
     if best_len > 0:
         return best_type, best_danger
 
-    # Hidden EXE check
     if b"\x4D\x5A" in file_bytes[:512]:
         return "hidden_exe", True
 
@@ -735,10 +605,6 @@ def detect_real_type(file_bytes: bytes) -> tuple:
 
 
 def _classify_zip(file_bytes: bytes) -> str:
-    """
-    Distinguish between ZIP-based formats:
-    APK, JAR, Office XML, or generic ZIP.
-    """
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
             names = zf.namelist()
@@ -791,7 +657,6 @@ def analyze_pe_header(file_bytes: bytes) -> list:
 
 
 def check_zip_contents(file_bytes: bytes, zip_subtype: str = "zip") -> list:
-    """Inspect ZIP contents for malicious entries, droppers, and bombs."""
     found = []
     EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}"
     danger_patterns = [
@@ -811,7 +676,6 @@ def check_zip_contents(file_bytes: bytes, zip_subtype: str = "zip") -> list:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
             names = zf.namelist()
 
-            # APK-specific checks
             if zip_subtype == "apk":
                 suspicious_assets = [
                     n for n in names
@@ -824,18 +688,15 @@ def check_zip_contents(file_bytes: bytes, zip_subtype: str = "zip") -> list:
                 if len(dex_files) > 5:
                     found.append(f"Multi-DEX evasion: {len(dex_files)} DEX files (normal APK has 1–2)")
 
-            # ZIP bomb check
             total_uncompressed = sum(info.file_size for info in zf.infolist())
             if total_uncompressed > 500 * 1024 * 1024:
                 found.append(f"ZIP Bomb: {total_uncompressed // 1024 // 1024} MB uncompressed")
                 return found
 
-            # Nested archives
             nested = [n for n in names if n.endswith((".zip", ".jar"))]
             if nested:
                 found.append(f"Nested archives inside ZIP: {', '.join(nested[:3])}")
 
-            # Per-file inspection
             for name in names:
                 if ".." in name or name.startswith("/"):
                     found.append(f"Path traversal in ZIP: {name}")
@@ -957,10 +818,6 @@ def check_entropy_anomaly(file_bytes: bytes, real_type: str) -> tuple:
     avg_e      = sum(entropies) / len(entropies)
     high_count = sum(1 for e in entropies if e > 5.0)
 
-    # ── Zero Trust: strict path for plain-text / script file types ────────────
-    # Plain-text files (.txt, .py, .js, .php, etc.) have naturally LOW entropy.
-    # Any chunk exceeding 5.0 bits/byte almost certainly contains an encrypted,
-    # packed, or obfuscated payload — block immediately without further review.
     if real_type not in naturally_high:
         if max_e > 5.0:
             return (
@@ -972,12 +829,6 @@ def check_entropy_anomaly(file_bytes: bytes, real_type: str) -> tuple:
             )
         return False, f"Normal entropy for plain-text type (max={max_e:.2f}, avg={avg_e:.2f})"
 
-    # ── Naturally high-entropy types: apply looser 7.8 threshold ──────────────
-    # Archives, media, and binary formats are inherently high-entropy.
-    # Only flag when entropy is pathologically high (> 7.8), which indicates
-    # a payload concealed inside the container.  Files that pass here are
-    # forwarded to the deeper inspection layers (ZIP / PE / Macro analysis)
-    # for further verification — entropy alone is not enough to clear them.
     if max_e > 8.0:
         return (
             True,
@@ -1075,9 +926,6 @@ def check_virustotal_hash(file_bytes: bytes) -> tuple:
         return None, f"VirusTotal: {exc}"
 
 
-# ══════════════════════════════════════════════════════════════
-# Core File Scan Orchestrator
-# ══════════════════════════════════════════════════════════════
 def _early_exit(result: dict, reason: str) -> dict:
     result["allowed"] = False
     result["reason"]  = reason
@@ -1087,10 +935,6 @@ def _early_exit(result: dict, reason: str) -> dict:
 
 
 def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0) -> dict:
-    """
-    Run the complete 7-layer local file analysis.
-    All layers are always executed; the *first* blocking reason is reported.
-    """
     result = {"allowed": True, "reason": "", "details": []}
     config = load_config()
     max_mb = config.get("max_file_size_mb", ANDROID_CHILD_MAX_MB)
@@ -1103,7 +947,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
     print(f'{"═"*60}')
     result["details"].append(f"[INFO] Extension: .{ext or 'none'} (informational only)")
 
-    # ── VirusTotal (cloud AV) ──────────────────────────────
     vt_ok, vt_msg = check_virustotal_hash(file_bytes)
     if vt_ok is False:
         result["details"].append(f"[VT] VirusTotal → BLOCK ({vt_msg})")
@@ -1112,7 +955,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
     result["details"].append(f"[VT] VirusTotal → {'PASS' if vt_ok else 'INFO'} ({vt_msg})")
     print(f"[VT] VirusTotal → {'PASS' if vt_ok else 'INFO'}\n    {vt_msg}")
 
-    # ── ClamAV (local AV) ─────────────────────────────────
     clam_ok, clam_msg = scan_with_clamav(file_bytes)
     if clam_ok is False:
         result["details"].append(f"[CLAM] ClamAV → BLOCK ({clam_msg})")
@@ -1121,7 +963,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
     result["details"].append(f"[CLAM] ClamAV → {'PASS' if clam_ok else 'INFO'} ({clam_msg})")
     print(f"[CLAM] ClamAV → {'PASS' if clam_ok else 'INFO'}\n    {clam_msg}")
 
-    # ── Size guard (final confirmation inside scan) ────────
     if total > max_mb * 1024 * 1024:
         msg = f"File too large ({total/1024/1024:.1f} MB — limit {max_mb} MB)"
         result["details"].append(f"[SIZE] → BLOCK: {msg}")
@@ -1132,13 +973,12 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
 
     first_block_reason = None
 
-    # ── Layer 1: Magic Bytes + ZIP subtype ─────────────────
     real_type, is_dangerous = detect_real_type(file_bytes)
     zip_subtype = "zip"
     if real_type in ("zip", "zip_empty"):
         zip_subtype = _classify_zip(file_bytes)
         if zip_subtype in ("apk", "jar"):
-            real_type = zip_subtype          # refine label for downstream layers
+            real_type = zip_subtype
 
     if is_dangerous:
         result["details"].append(f"[1] Magic Bytes → BLOCK (type={real_type})")
@@ -1149,7 +989,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[1] Magic Bytes → PASS (type={real_type})")
         print(f"[1] Magic Bytes → PASS (type={real_type})")
 
-    # ── Layer 2: PE Header ────────────────────────────────
     if real_type in ("exe/dll", "hidden_exe"):
         pe_issues = analyze_pe_header(file_bytes)
         if pe_issues:
@@ -1168,7 +1007,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[2] PE Header → SKIP (type={real_type})")
         print(f"[2] PE Header → SKIP (type={real_type})")
 
-    # ── Layer 3: ZIP / APK / JAR Contents ────────────────
     if real_type in ("zip", "zip_empty", "office_xml", "apk", "jar"):
         zip_issues = check_zip_contents(file_bytes, zip_subtype=zip_subtype)
         if zip_issues:
@@ -1187,7 +1025,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[3] ZIP Contents → SKIP (type={real_type})")
         print(f"[3] ZIP Contents → SKIP (type={real_type})")
 
-    # ── Layer 4: PDF Analysis ─────────────────────────────
     if real_type == "pdf":
         pdf_issues = analyze_pdf(file_bytes)
         if pdf_issues:
@@ -1206,7 +1043,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[4] PDF Analysis → SKIP (type={real_type})")
         print(f"[4] PDF Analysis → SKIP (type={real_type})")
 
-    # ── Layer 5: Office Macros ────────────────────────────
     if real_type in ("ms_office", "office_xml", "zip", "zip_empty"):
         macro_issues = check_office_macros(file_bytes)
         if macro_issues:
@@ -1225,7 +1061,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[5] Office Macros → SKIP (type={real_type})")
         print(f"[5] Office Macros → SKIP (type={real_type})")
 
-    # ── Layer 6: Entropy Anomaly ──────────────────────────
     is_anomaly, entropy_msg = check_entropy_anomaly(file_bytes, real_type)
     if is_anomaly:
         result["details"].append(f"[6] Entropy → BLOCK ({entropy_msg})")
@@ -1236,7 +1071,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append(f"[6] Entropy → PASS ({entropy_msg})")
         print(f"[6] Entropy → PASS\n    {entropy_msg}")
 
-    # ── Layer 7: Script / Text Analysis ──────────────────
     text_issues = analyze_text_content(file_bytes)
     if text_issues:
         result["details"].append(f"[7] Script Analysis → BLOCK ({text_issues[0]})")
@@ -1251,7 +1085,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
         result["details"].append("[7] Script Analysis → PASS")
         print("[7] Script Analysis → PASS")
 
-    # ── Final verdict ─────────────────────────────────────
     print(f"{'═'*60}")
     if first_block_reason:
         result["allowed"] = False
@@ -1267,9 +1100,6 @@ def scan_file_content(file_bytes: bytes, filename: str, content_length: int = 0)
     return result
 
 
-# ══════════════════════════════════════════════════════════════
-# API Routes
-# ══════════════════════════════════════════════════════════════
 @app.route("/check-safety", methods=["POST"])
 def check_safety():
     if not auth_required(request):
@@ -1290,15 +1120,6 @@ def check_safety():
 
 @app.route("/scan-file", methods=["POST"])
 def scan_file():
-    """
-    Remote file scanning.
-
-    Flow:
-      1. HEAD request  →  read Content-Type + Content-Length (0 data downloaded)
-      2. If size > limit → block immediately, nothing downloaded
-      3. If size ≤ limit → GET full file, then run complete 7-layer scan
-      4. Safety net after GET: re-check real size (server may lie)
-    """
     if not auth_required(request):
         return jsonify({"allowed": False}), 401
     if not rate_limit_check(max_calls=30, window=60):
@@ -1319,7 +1140,6 @@ def scan_file():
         max_mb    = config.get("max_file_size_mb", ANDROID_CHILD_MAX_MB)
         max_bytes = max_mb * 1024 * 1024
 
-        # ── Step 1: HEAD — get headers with zero body ──────────────────
         head = requests.head(
             file_url, timeout=10, allow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0"},
@@ -1330,9 +1150,6 @@ def scan_file():
 
         print(f"   📋 Content-Type : {content_type}")
 
-        # content_length == 0 means the server didn't send a Content-Length header
-        # (common with chunked transfer or CDNs). In that case we skip the early
-        # block and rely on the post-download safety-net check instead.
         if content_length > 0:
             print(f"   📏 Declared size: {content_length / 1024 / 1024:.2f} MB  (limit: {max_mb} MB)")
         else:
@@ -1341,8 +1158,6 @@ def scan_file():
         if "text/html" in content_type and "attachment" not in content_disposition:
             return jsonify({"allowed": False, "reason": "This is a webpage, not a downloadable file"})
 
-        # ── Step 2: Immediate block if declared size exceeds child limit ─
-        # Only enforce when content_length is actually known (> 0).
         if content_length > max_bytes:
             msg = (
                 f"File too large for a child's device "
@@ -1353,7 +1168,6 @@ def scan_file():
             log_file(filename, False, msg, child_id)
             return jsonify({"allowed": False, "reason": msg})
 
-        # ── Step 3: Download full file ─────────────────────────────────
         print(f"   ⬇️  Downloading full file ...")
         resp       = requests.get(
             file_url, timeout=60, stream=False,
@@ -1361,7 +1175,6 @@ def scan_file():
         )
         file_bytes = resp.content
 
-        # ── Step 4: Safety net (server lied / no Content-Length header) ─
         if len(file_bytes) > max_bytes:
             msg = (
                 f"File too large for a child's device "
@@ -1389,7 +1202,6 @@ def scan_file():
 
 @app.route("/scan-local-file", methods=["POST"])
 def scan_local_file():
-    """Scan a file uploaded directly as base64 content."""
     if not auth_required(request):
         return jsonify({"allowed": False}), 401
     if not rate_limit_check(max_calls=30, window=60):
@@ -1434,16 +1246,11 @@ def scan_local_file():
 
 
 def _save_config(config: dict) -> None:
-    """
-    Write config to disk atomically (write to temp file then rename)
-    and invalidate the in-memory cache so the next request re-reads it.
-    Must be called while holding _config_lock.
-    """
     global _config_cache, _config_mtime
     tmp_path = CONFIG_PATH + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(config, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, CONFIG_PATH)          # atomic on POSIX
+    os.replace(tmp_path, CONFIG_PATH)
     _config_cache = config
     _config_mtime = os.path.getmtime(CONFIG_PATH)
 
@@ -1501,9 +1308,6 @@ def unblock_app():
     return jsonify({"success": True})
 
 
-# ══════════════════════════════════════════════════════════════
-# Health Check
-# ══════════════════════════════════════════════════════════════
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -1524,9 +1328,6 @@ def health():
     })
 
 
-# ══════════════════════════════════════════════════════════════
-# Entry Point  (development only — use Gunicorn in production)
-# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     HOST = "0.0.0.0"
     PORT = 9000

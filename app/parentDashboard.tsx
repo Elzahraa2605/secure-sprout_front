@@ -21,7 +21,6 @@ import styles, {
 
 import ChildMap from './childMap';
 
-// تأكدي أن هذا الـ IP هو نفس الـ IP الخاص بسيرفر الـ Laravel بتاعك
 const API_BASE_URL = 'http://192.168.1.9:8000/api'; 
 
 export default function ParentDashboard() {
@@ -35,19 +34,17 @@ export default function ParentDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [screenTime, setScreenTime] = useState("0h 0m");
 
-  // --- الجزء الجديد الخاص بالهاردوير ---
   const [isHardwareOnline, setIsHardwareOnline] = useState(false);
+  const [latestAlert, setLatestAlert] = useState<any>(null); // <-- State مضاف لحفظ آخر تنبيه قادم من لارافيل للطفل الحالي
 
   const checkHardwareStatus = useCallback(async () => {
     try {
-      // بنكلم الـ endpoint اللي ضفناه في الـ Backend
       const response = await axios.get(`${API_BASE_URL}/light-status`);
       setIsHardwareOnline(response.data.is_online);
     } catch (error) {
       setIsHardwareOnline(false);
     }
   }, []);
-  // ------------------------------------
 
   const formatTime = (totalMinutes: number) => {
     if (!totalMinutes || totalMinutes === 0) return "0h 0m";
@@ -77,11 +74,13 @@ export default function ParentDashboard() {
       
       setChildren(childrenData);
 
-      if (childrenData.length > 0 && !selectedChild) {
-        setSelectedChild(childrenData[0]);
+      if (childrenData.length > 0) {
+        const currentActive = selectedChild 
+          ? childrenData.find((c: any) => c.id === selectedChild.id) || childrenData[0]
+          : childrenData[0];
+        setSelectedChild(currentActive);
       }
       
-      // تحديث حالة الهاردوير مع تحديث الداتا
       checkHardwareStatus();
     } catch (error: any) {
       console.log("🚨 Dashboard Error:", error.message);
@@ -116,22 +115,73 @@ export default function ParentDashboard() {
     }
   }, []);
 
+  // 🛡️ دالة مضافة لجلب التنبيه الأمني الفعلي المخزن للطفل الحالي في لارافيل وعرضه بالكارد
+  const fetchLaravelAlerts = useCallback(async (childId: number | string, token: string) => {
+    try {
+      const headers = { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' };
+      const response = await axios.get(`${API_BASE_URL}/parent/alerts?child_id=${childId}`, { headers });
+      if (response.data && response.data.length > 0) {
+        setLatestAlert(response.data[0]);
+      } else {
+        setLatestAlert(null);
+      }
+    } catch (error) {
+      setLatestAlert(null);
+    }
+  }, []);
+
+  // 🔄 دالة مضافة لتصفير العداد محلياً وفي السيرفر عند الضغط على الكارد وقبل الذهاب للريبورتات
+  const handleAlertBoxPress = async () => {
+    if (!selectedChild?.id) return;
+    try {
+      const token = await AsyncStorage.getItem('userToken');
+      const headers = { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' };
+      
+      await axios.post(`${API_BASE_URL}/parent/alerts/mark-all-read`, {
+        child_id: selectedChild.id
+      }, { headers });
+
+      setLatestAlert((prev: any) => prev ? { ...prev, is_read: true } : null);
+      setChildren((prev: any[]) => prev.map((c: any) => c.id === selectedChild.id ? { ...c, alerts_count: 0 } : c));
+      if (selectedChild) {
+        setSelectedChild({ ...selectedChild, alerts_count: 0 });
+      }
+
+      router.push('/Reports');
+    } catch (error) {
+      router.push('/Reports');
+    }
+  };
+
   useEffect(() => {
     let locationInterval: any;
     let hardwareInterval: any;
+    let alertsInterval: any;
 
     const loadData = async () => {
       const token = await AsyncStorage.getItem('userToken');
       if (token && selectedChild?.id) {
         fetchChildLocation(selectedChild.id, token);
         fetchChildUsage(selectedChild.id, token);
+        fetchLaravelAlerts(selectedChild.id, token); // جلب أول تنبيه
 
         locationInterval = setInterval(() => {
           fetchChildLocation(selectedChild.id, token);
         }, 30000);
+
+        // تحديث حي لعداد الإشعارات والبيانات كل 10 ثوانٍ تلقائياً
+        alertsInterval = setInterval(() => {
+          fetchLaravelAlerts(selectedChild.id, token);
+          axios.get(`${API_BASE_URL}/parent/childs`, { headers: { 'Authorization': `Bearer ${token}` } })
+            .then(res => {
+              const updatedList = Array.isArray(res.data) ? res.data : (res.data.data || []);
+              setChildren(updatedList);
+              const current = updatedList.find((c: any) => c.id === selectedChild.id);
+              if (current) setSelectedChild(current);
+            }).catch(() => {});
+        }, 10000);
       }
       
-      // شيك على الهاردوير كل 10 ثواني
       hardwareInterval = setInterval(checkHardwareStatus, 10000);
     };
 
@@ -140,8 +190,9 @@ export default function ParentDashboard() {
     return () => {
       if (locationInterval) clearInterval(locationInterval);
       if (hardwareInterval) clearInterval(hardwareInterval);
+      if (alertsInterval) clearInterval(alertsInterval);
     };
-  }, [selectedChild?.id, fetchChildLocation, fetchChildUsage, checkHardwareStatus]);
+  }, [selectedChild?.id, fetchChildLocation, fetchChildUsage, checkHardwareStatus, fetchLaravelAlerts]);
 
   useEffect(() => {
     fetchDashboardData();
@@ -192,13 +243,11 @@ export default function ParentDashboard() {
         <Text style={styles.sectionTitle}>My Family</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.familyRow}>
           
-          {/* 1. زرار إضافة طفل */}
           <TouchableOpacity style={styles.addChildBtn} onPress={() => router.push('/childSignUp')}>
              <View style={styles.addCircleInside}><Ionicons name="add" size={35} color="#0288D1" /></View>
              <Text style={styles.memberName}>Add Child</Text>
           </TouchableOpacity>
 
-          {/* 2. زرار الهاردوير (Monitor) المدمج */}
           <TouchableOpacity 
             style={styles.familyMember} 
             onPress={() => router.push('/monitor')}
@@ -213,7 +262,6 @@ export default function ParentDashboard() {
             </Text>
           </TouchableOpacity>
 
-          {/* 3. قائمة الأطفال الديناميكية */}
           {children.map((child) => (
             <TouchableOpacity 
               key={child.id} 
@@ -222,6 +270,7 @@ export default function ParentDashboard() {
                 if (selectedChild?.id !== child.id) {
                     setSelectedChild(child);
                     setChildLocation(null);
+                    setLatestAlert(null);
                 }
               }}
               onLongPress={() => handleChildLongPress(child)}
@@ -245,20 +294,27 @@ export default function ParentDashboard() {
               <Ionicons name="notifications-outline" size={30} color="#01579B" style={styles.statIcon}/>
               <Text style={styles.cardLabel}>Latest Alert</Text>
               <Text style={styles.cardValue}>{selectedChild?.alerts_count ? `${selectedChild.alerts_count} New` : '0 New'}</Text>
-              <Text style={styles.noChangeText}>No change</Text>
+              <Text style={styles.noChangeText}>Live Protection</Text>
           </View>
         </View>
 
         <Text style={styles.sectionTitle}>Alerts & Activity</Text>
-        <TouchableOpacity style={styles.alertPriorityCard} onPress={() => router.push('/Reports')}>
-            <View style={styles.alertHeader}>
-               <Ionicons name="warning" size={20} color="#FFD600" />
-               <Text style={styles.priorityText}>High priority</Text>
-            </View>
-            <Text style={styles.alertTitle}>New Content Alert</Text>
-            <Text style={styles.alertSub}>Activity detected on '{selectedChild?.name || 'child'}' device.</Text>
-            <Ionicons name="chevron-forward" size={20} color="#fff" style={styles.alertArrow} />
-        </TouchableOpacity>
+        {latestAlert ? (
+          <TouchableOpacity style={styles.alertPriorityCard} onPress={handleAlertBoxPress}>
+              <View style={styles.alertHeader}>
+                 <Ionicons name="warning" size={20} color="#FFD600" />
+                 <Text style={styles.priorityText}>High priority ({latestAlert.type})</Text>
+              </View>
+              <Text style={styles.alertTitle}>{latestAlert.title}</Text>
+              <Text style={styles.alertSub}>{latestAlert.message}</Text>
+              <Ionicons name="chevron-forward" size={20} color="#fff" style={styles.alertArrow} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.alertPriorityCard}>
+              <Text style={styles.alertTitle}>Your Device is Protected ✨</Text>
+              <Text style={styles.alertSub}>No safety violations or restricted activities detected today.</Text>
+          </View>
+        )}
 
         <View style={styles.mapCard}>
             <View style={styles.mapInfo}>
@@ -314,5 +370,3 @@ export default function ParentDashboard() {
     </View>
   );
 }
-
-// styles moved to app/parentDashboard.styles.ts
