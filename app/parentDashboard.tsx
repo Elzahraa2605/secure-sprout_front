@@ -39,7 +39,8 @@ export default function ParentDashboard() {
 
   const checkHardwareStatus = useCallback(async () => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/light-status`);
+      // 🟢 تعديل المسار ليطابق الرابط العام الجديد المبني على الكاش في لارافيل
+      const response = await axios.get(`${API_BASE_URL}/hardware/light-status`);
       setIsHardwareOnline(response.data.is_online);
     } catch (error) {
       setIsHardwareOnline(false);
@@ -250,7 +251,7 @@ export default function ParentDashboard() {
 
           <TouchableOpacity 
             style={styles.familyMember} 
-            onPress={() => router.push('/monitor')}
+            onPress={() => router.push('/infantRoom')} // توجيه لغرفة الطفل بشكل صحيح
           >
             <View style={getHardwareAvatarStyle(isHardwareOnline)}>
               <MaterialCommunityIcons name="baby-face-outline" size={38} color={isHardwareOnline ? "#0288D1" : "#A0B4C8"} />
